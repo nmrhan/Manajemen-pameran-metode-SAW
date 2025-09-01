@@ -1,0 +1,96 @@
+<?php
+require 'koneksi.php';
+require 'vendor/autoload.php';
+
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+
+// Ambil data LPJ yang sudah direalisasi (status = 3)
+$query = "
+    SELECT 
+        p.no_lokasi,
+        l.nama_lokasi,
+        SUM(p.aktual_pengunjung) AS total_pengunjung,
+        SUM(p.jml_hot_prospek) AS total_hotprospek,
+        SUM(p.aktual_penjualan) AS total_spk,
+        SUM(p.aktual_biayapameran) AS total_biaya
+    FROM proposal_pengajuans p
+    JOIN lokasi_pamerans l ON p.no_lokasi = l.no_lokasi
+    WHERE p.realisasi = '3'
+    GROUP BY p.no_lokasi
+";
+
+$result = mysqli_query($koneksi, $query);
+$data = [];
+while ($row = mysqli_fetch_assoc($result)) {
+    $data[] = $row;
+}
+
+// Bobot kriteria SAW
+$weights = [
+    'total_spk' => 0.4,
+    'total_pengunjung' => 0.3,
+    'total_hotprospek' => 0.2,
+    'total_biaya' => 0.1
+];
+
+// Normalisasi
+$max = [
+    'total_spk' => max(array_column($data, 'total_spk')),
+    'total_pengunjung' => max(array_column($data, 'total_pengunjung')),
+    'total_hotprospek' => max(array_column($data, 'total_hotprospek'))
+];
+$min = [
+    'total_biaya' => min(array_column($data, 'total_biaya'))
+];
+
+foreach ($data as &$d) {
+    $norm_spk = $d['total_spk'] / $max['total_spk'];
+    $norm_pengunjung = $d['total_pengunjung'] / $max['total_pengunjung'];
+    $norm_hotprospek = $d['total_hotprospek'] / $max['total_hotprospek'];
+    $norm_biaya = $min['total_biaya'] / $d['total_biaya'];
+
+    $score = (
+        $norm_spk * $weights['total_spk'] +
+        $norm_pengunjung * $weights['total_pengunjung'] +
+        $norm_hotprospek * $weights['total_hotprospek'] +
+        $norm_biaya * $weights['total_biaya']
+    );
+
+    $d['score'] = round($score, 3);
+}
+
+// Urutkan berdasarkan skor
+usort($data, fn($a, $b) => $b['score'] <=> $a['score']);
+
+$spreadsheet = new Spreadsheet();
+$sheet = $spreadsheet->getActiveSheet();
+
+// Header
+$sheet->fromArray([
+    'Nama Lokasi', 'Total SPK', 'Total Pengunjung', 'Total Hot Prospek', 'Total Biaya', 'Skor SAW', 'Ranking'
+], NULL, 'A1');
+
+// Data
+$rowNum = 2;
+$rank = 1;
+foreach ($data as $row) {
+    $sheet->fromArray([
+        $row['nama_lokasi'],
+        $row['total_spk'],
+        $row['total_pengunjung'],
+        $row['total_hotprospek'],
+        $row['total_biaya'],
+        $row['score'],
+        $rank++
+    ], NULL, 'A' . $rowNum++);
+}
+
+// Export
+header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+header('Content-Disposition: attachment;filename="SAW_Penilaian_Lokasi.xlsx"');
+header('Cache-Control: max-age=0');
+
+$writer = new Xlsx($spreadsheet);
+$writer->save('php://output');
+exit;
